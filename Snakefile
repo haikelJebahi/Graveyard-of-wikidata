@@ -1,8 +1,32 @@
 # règle qui spécifie les fichiers que l'on veut générer
 rule targets:
     input:
-      "data/merged/status500_Joined.parsed.tsv"
+      "data/tsne/tsne.joblib"
 
+rule tsne:
+    input:
+        "data/pca/pca.joblib"
+    output:
+        "data/tsne/tsne.joblib"
+    shell:
+        "/usr/bin/env python3 script/tsne.py {input} {output}"
+
+rule pca:
+    input:
+        "data/sample/status500_Joined.parsed.sample.tsv"
+    output:
+        ["data/pca/pca.joblib","data/pca/pca_features.joblib"]
+    shell:
+        "/usr/bin/env python3 script/pca.py {input} {output}"
+
+rule sample:
+    input:
+        "data/merged/status500_Joined.parsed.tsv"
+    output:
+        "data/sample/status500_Joined.parsed.sample.tsv"
+    shell:
+        # 122832
+        "/usr/bin/env python3 script/sample.py {input} {output} 122832"
 
 def merge_inputs(wildcards):
     files = expand("data/parsed/{file}.parsed.tsv", file=[
@@ -31,3 +55,5 @@ rule parse:
         "data/parsed/{base}.parsed.tsv"
     shell:
         "/usr/bin/env python3 script/parse.py {input} {output}"
+
+

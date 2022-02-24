@@ -3,3 +3,7 @@
 /data/parsed/
 /venv/
 /.idea/
+/tmp/
+/data/pca/
+/data/sample/
+/data/tsne/
