@@ -1,7 +1,5 @@
 # Graveyard-of-wikidata
 
-See https://deepnote.com/project/Graveyard-of-wikidata-UT7TctlYRhi13EsYbyVVvQ for online deepnote notebook
-
 See cluster.ipynb for cluster results
 
 ## Load files & analysis with PCA & TSNE
