@@ -1,9 +1,9 @@
 #! /usr/bin/env python3
-
+import json
 import sys
 import csv
 import pandas as pd
-from urllib.parse import unquote_plus
+from urllib.parse import unquote_plus, quote_plus
 from pyparsing import ParseException
 from rdflib.paths import *
 from rdflib.plugins.sparql.algebra import translateQuery, translateUpdate, pprintAlgebra, traverse
@@ -12,7 +12,9 @@ from rdflib.plugins.sparql.operators import Builtin_LANG
 from rdflib.plugins.sparql.parserutils import *
 from rdflib.term import Variable
 import re
-from pandas import concat
+import io
+from contextlib import redirect_stdout
+import networkx as nx
 
 input_file = sys.argv[1]
 output_file = sys.argv[2]
@@ -47,7 +49,6 @@ def raw2parse(raw):
             print()
 
 
-
 df["query"] = df["rawAnonymizedQuery"].apply(raw2parse)
 
 df_nona = df.dropna()
@@ -56,7 +57,8 @@ df_nona = df.dropna()
 # Node visitor
 class NodeVisitor:
     def __init__(self):
-        self.__var = set()
+        self._var = set()
+        self._triplesSet = []
         self.var_cpt = 0
         self.filter = 0
         self.orderby = 0
@@ -111,13 +113,19 @@ class NodeVisitor:
 
     def __visite_variable__(self, x):
         if isinstance(x, Variable):
-            was_here = x in self.__var
+            was_here = x in self._var
             if not was_here:
-                self.__var.add(x)
+                self._var.add(x)
                 self.var_cpt = self.var_cpt + 1
 
     def __visite_compvalue__(self, x):
         if isinstance(x, CompValue):
+            if x.name == "ServiceGraphPattern":
+                if x.graph.part != None and x.graph.part[0].triples != None:
+
+                    for triple in x.graph.part[0].triples:
+                        self._triplesSet.append(triple)
+
             if x.name == "SelectQuery":
                 self.select = self.select + 1
 
@@ -131,6 +139,12 @@ class NodeVisitor:
                 self.bgp = self.bgp + 1
 
                 self.triples = self.triples + len(x.triples)
+
+                for t in x.triples:
+                    self._triplesSet.append(
+                        [str(t[0]), str(t[1]), str(t[2])]
+                    )
+
                 # add triples to count
                 if len(x.triples) >= 2:
                     self.join = self.join + len(x.triples) - 1
@@ -154,8 +168,8 @@ class NodeVisitor:
                     self.limit = x.get("length")
             if x.name == "Project":
                 self.project = self.project + 1
-            if isinstance(x.A,list):
-                if len(x.A)>1:
+            if isinstance(x.A, list):
+                if len(x.A) > 1:
                     if "Sample" in str(x.A[1]):
                         self.sample = self.sample + 1
                     if "Count" in str(x.A[1]):
@@ -217,13 +231,13 @@ def f(line) -> NodeVisitor:
         print("anonymizedQuery : " + str(line["anonymizedQuery"]))
         print("")
 
-    query : Query = line["query"]
+    query: Query = line["query"]
     visitor = NodeVisitor()
     traverse(query.algebra, visitPre=lambda x: visitor.visite(x))
     return visitor
 
 
-df_nona["visitor"] = df_nona.apply(f,axis=1)
+df_nona["visitor"] = df_nona.apply(f, axis=1)
 
 
 # Add visitors data to dataframe
@@ -236,8 +250,56 @@ properties = props(NodeVisitor())
 for propertyStr in properties:
     df_nona[propertyStr] = df_nona["visitor"].apply(lambda x: getattr(x, propertyStr))
 
-df_nona["complexPathWith"] = df_nona.loc[:,['pathWithStar','pathWithQuestionMark','pathWithPlus']].sum(axis=1)
-df_nona["simplePathWith"] = df_nona.loc[:,['pathWithInv','pathWithSequence','pathWithAlternative']].sum(axis=1)
+df_nona["triplesSet"] = df_nona["visitor"].apply(lambda visitor: json.dumps([(str(t[0]), str(t[1]), str(t[2])) for t in visitor._triplesSet]))
+df_nona["complexPathWith"] = df_nona.loc[:, ['pathWithStar', 'pathWithQuestionMark', 'pathWithPlus']].sum(axis=1)
+df_nona["simplePathWith"] = df_nona.loc[:, ['pathWithInv', 'pathWithSequence', 'pathWithAlternative']].sum(axis=1)
+df_nona["simplePathWith"] = df_nona.loc[:, ['pathWithInv', 'pathWithSequence', 'pathWithAlternative']].sum(axis=1)
+df_nona["algebraTree"] = df_nona["query"].apply(lambda query: str(query.algebra))
 
+
+# Analyse par graphe
+def func_to_graphe(v: NodeVisitor) -> nx.DiGraph:
+    edges = dict()
+    for triple in v._triplesSet:
+        edges[triple[0], triple[2]] = triple[1]
+
+    graph = nx.DiGraph()
+    graph.add_edges_from(edges)
+    return graph
+
+
+df_nona["graph"] = df_nona["visitor"].apply(func_to_graphe)
+
+df_nona["cycleNumber"] = df_nona["graph"].apply(lambda graph: len(list(nx.simple_cycles(graph))))
+
+
+def func_is_tree(graph):
+    if len(graph) == 0:
+        return 1
+    else:
+        if nx.is_tree(graph):
+            return 1
+        else:
+            return 0
+
+
+df_nona["isTree"] = df_nona["graph"].apply(func_is_tree)
+
+
+def func_is_forest(graph):
+    if len(graph) == 0:
+        return 1
+    else:
+        if nx.is_forest(graph):
+            return 1
+        else:
+            return 0
+
+
+df_nona["isForest"] = df_nona["graph"].apply(func_is_forest)
+df_nona["numberOfNodes"] = df_nona["graph"].apply(lambda graph: graph.number_of_nodes())
+df_nona["numberOfEdges"] = df_nona["graph"].apply(lambda graph: graph.number_of_edges())
+
+# Output
 df_nona_serializable = df_nona.drop(columns=["query", "visitor", "rawAnonymizedQuery"])
 df_nona_serializable.to_csv(output_file, sep='\t', index=False)

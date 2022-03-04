@@ -42,7 +42,12 @@ features = [
     "count",
     "having",
     "complexPathWith",
-    "simplePathWith"
+    "simplePathWith",
+    "cycleNumber",
+    "isTree",
+    "isForest",
+    "numberOfNodes",
+    "numberOfEdges"
 ]
 
 df_pca = df[features]
