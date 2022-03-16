@@ -1,9 +1,12 @@
 #! /usr/bin/env python3
+import base64
 import json
 import sys
 import csv
 import pandas as pd
 from urllib.parse import unquote_plus, quote_plus
+
+from joblib import dump
 from pyparsing import ParseException
 from rdflib.paths import *
 from rdflib.plugins.sparql.algebra import translateQuery, translateUpdate, pprintAlgebra, traverse
@@ -15,6 +18,7 @@ import re
 import io
 from contextlib import redirect_stdout
 import networkx as nx
+import hashlib
 
 input_file = sys.argv[1]
 output_file = sys.argv[2]
@@ -60,9 +64,10 @@ class NodeVisitor:
         self._var = set()
         self._triplesSet = []
         self.var_cpt = 0
-        self.filter = 0
+        self.filter_regex = 0
+        self.filter_relational_expression = 0
         self.orderby = 0
-        self.limit = 0
+        self._limit = 0
         self.select = 0
         self.distinct = 0
         self.join = 0
@@ -75,7 +80,7 @@ class NodeVisitor:
         self.groupBy = 0
         self.slice = 0
         self.triples = 0
-        self.offset = 0
+        self._offset = 0
         self.extend = 0
         self.filter_not_exists = 0
         self.leftJoin = 0
@@ -93,6 +98,9 @@ class NodeVisitor:
         self.pathWithAlternative = 0
 
     def visite(self, node):
+        if isinstance(node, Expr):
+            self.__visite_Expr__(node)
+
         if isinstance(node, Variable):
             self.__visite_variable__(node)
 
@@ -122,18 +130,17 @@ class NodeVisitor:
         if isinstance(x, CompValue):
             if x.name == "ServiceGraphPattern":
                 if x.graph.part != None and x.graph.part[0].triples != None:
-
                     for triple in x.graph.part[0].triples:
                         self._triplesSet.append(triple)
 
+                if x.graph.where is not None:
+                    for part in x.graph.where.part:
+                        if part.triples != None:
+                            for triple in part.triples:
+                                self._triplesSet.append(triple)
+
             if x.name == "SelectQuery":
                 self.select = self.select + 1
-
-            if x.name == "Filter":
-                self.filter = self.filter + 1
-                if isinstance(x.expr, Expr):
-                    if x.expr.name == "Builtin_NOTEXISTS":
-                        self.filter_not_exists = self.filter_not_exists + 1
 
             if x.name == "BGP":
                 self.bgp = self.bgp + 1
@@ -163,9 +170,9 @@ class NodeVisitor:
             if x.name == "Slice":
                 self.slice = self.slice + 1
                 if x.get("start") != "start":
-                    self.offset = x.get("start")
+                    self._offset = x.get("start")
                 if (x.get("length") != "length"):
-                    self.limit = x.get("length")
+                    self._limit = x.get("length")
             if x.name == "Project":
                 self.project = self.project + 1
             if isinstance(x.A, list):
@@ -224,6 +231,20 @@ class NodeVisitor:
 
             self.pathWithAlternative = self.pathWithAlternative + 1
 
+    def __visite_Expr__(self, x):
+        if isinstance(x, Expr):
+            if x.name == "Builtin_NOTEXISTS":
+                self.filter_not_exists = self.filter_not_exists + 1
+
+            if x.name == "Builtin_REGEX":
+                self.filter_regex = self.filter_regex + 1
+
+            if x.name == "RelationalExpression":
+                self.filter_relational_expression = self.filter_relational_expression + 1
+
+
+
+
 
 def f(line) -> NodeVisitor:
     if verbose:
@@ -248,16 +269,35 @@ def props(cls):
 properties = props(NodeVisitor())
 
 for propertyStr in properties:
+    print(propertyStr)
     df_nona[propertyStr] = df_nona["visitor"].apply(lambda x: getattr(x, propertyStr))
 
-df_nona["triplesSet"] = df_nona["visitor"].apply(lambda visitor: json.dumps([(str(t[0]), str(t[1]), str(t[2])) for t in visitor._triplesSet]))
+df_nona["triplesSet"] = df_nona["visitor"].apply(
+    lambda visitor: json.dumps([(str(t[0]), str(t[1]), str(t[2])) for t in visitor._triplesSet])
+)
+
+df_nona["limit"] = df_nona["visitor"].apply(
+    lambda visitor: (0 if visitor._limit == 0 else 1)
+)
+df_nona["limitValue"] = df_nona["visitor"].apply(
+    lambda visitor: visitor._limit
+)
+df_nona["offset"] = df_nona["visitor"].apply(
+    lambda visitor: 0 if visitor._offset == 0 else 1
+)
+df_nona["offsetValue"] = df_nona["visitor"].apply(
+    lambda visitor: visitor._offset
+)
 df_nona["complexPathWith"] = df_nona.loc[:, ['pathWithStar', 'pathWithQuestionMark', 'pathWithPlus']].sum(axis=1)
 df_nona["simplePathWith"] = df_nona.loc[:, ['pathWithInv', 'pathWithSequence', 'pathWithAlternative']].sum(axis=1)
 df_nona["simplePathWith"] = df_nona.loc[:, ['pathWithInv', 'pathWithSequence', 'pathWithAlternative']].sum(axis=1)
 df_nona["algebraTree"] = df_nona["query"].apply(lambda query: str(query.algebra))
+df_nona["algebraTreeMD5"] = df_nona["algebraTree"].apply(
+    lambda algebraTree : hashlib.md5(algebraTree.encode()).hexdigest()
+)
+df_nona["filter"] = df_nona["filter_regex"] + df_nona["filter_relational_expression"]
 
-
-# Analyse par graphe
+# Construction des graphes
 def func_to_graphe(v: NodeVisitor) -> nx.DiGraph:
     edges = dict()
     for triple in v._triplesSet:
@@ -270,12 +310,12 @@ def func_to_graphe(v: NodeVisitor) -> nx.DiGraph:
 
 df_nona["graph"] = df_nona["visitor"].apply(func_to_graphe)
 
-df_nona["cycleNumber"] = df_nona["graph"].apply(lambda graph: len(list(nx.simple_cycles(graph))))
 
+# Ajouts des features
 
 def func_is_tree(graph):
     if len(graph) == 0:
-        return 1
+        return 0
     else:
         if nx.is_tree(graph):
             return 1
@@ -283,12 +323,9 @@ def func_is_tree(graph):
             return 0
 
 
-df_nona["isTree"] = df_nona["graph"].apply(func_is_tree)
-
-
 def func_is_forest(graph):
     if len(graph) == 0:
-        return 1
+        return 0
     else:
         if nx.is_forest(graph):
             return 1
@@ -296,10 +333,37 @@ def func_is_forest(graph):
             return 0
 
 
+def dump2base64(graph):
+    bytes = io.BytesIO()
+    dump(graph, bytes)
+    graphDump = base64.b64encode(bytes.getvalue()).decode()
+    return str(graphDump)
+
+def func_averageDegree(graph):
+    if len(graph) == 0:
+        return 0
+
+    return sum([val for (node, val) in graph.degree]) / len(graph.degree)
+
+
+df_nona["cycleNumber"] = df_nona["graph"].apply(lambda graph: len(list(nx.simple_cycles(graph))))
+df_nona["graphDump"] = df_nona["graph"].apply(dump2base64)
 df_nona["isForest"] = df_nona["graph"].apply(func_is_forest)
 df_nona["numberOfNodes"] = df_nona["graph"].apply(lambda graph: graph.number_of_nodes())
 df_nona["numberOfEdges"] = df_nona["graph"].apply(lambda graph: graph.number_of_edges())
+df_nona["treewidth"] = df_nona["graph"].apply(
+    lambda graph: nx.algorithms.approximation.treewidth_min_fill_in(graph.to_undirected())[0])
+df_nona["isTree"] = df_nona["graph"].apply(func_is_tree)
+df_nona["averageDegree"] = df_nona["graph"].apply(func_averageDegree)
+df_nona["maxCliqueWeigth"] = df_nona["graph"].apply(
+    lambda graph: nx.max_weight_clique(graph.to_undirected(), weight=None)[1]
+)
 
 # Output
-df_nona_serializable = df_nona.drop(columns=["query", "visitor", "rawAnonymizedQuery"])
+df_nona_serializable = df_nona.drop(columns=[
+    "query", "visitor", "rawAnonymizedQuery"
+    #,"graph"
+    #,"algebraTree"
+    ])
 df_nona_serializable.to_csv(output_file, sep='\t', index=False)
+

@@ -47,7 +47,10 @@ features = [
     "isTree",
     "isForest",
     "numberOfNodes",
-    "numberOfEdges"
+    "numberOfEdges",
+    "treewidth",
+    "averageDegree",
+    "maxCliqueWeigth"
 ]
 
 df_pca = df[features]

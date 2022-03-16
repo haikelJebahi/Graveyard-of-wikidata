@@ -10,6 +10,6 @@ output_file = sys.argv[2]
 
 df = pd.read_csv(input_file, sep='\t')
 
-df_out = df.drop_duplicates(subset="algebraTree")
+df_out = df.drop_duplicates(subset="algebraTreeMD5")
 
 df_out.to_csv(output_file, sep='\t', index=False)
